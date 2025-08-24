@@ -1,0 +1,119 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>PrintBox</title>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; }
+h1 { margin: 0 0 1rem; }
+section { border: 1px solid #ddd; padding: 1rem; margin-bottom: 1rem; border-radius: 8px; }
+label { display:block; margin: .25rem 0; }
+textarea, input[type=text] { width: 100%; padding: .5rem; }
+button { padding: .5rem 1rem; }
+small { color: #666; }
+</style>
+
+<h1>PrintBox (WT32-ETH01 → TM-T88IV)</h1>
+
+<section>
+  <h2>Print Message</h2>
+  <label>Message</label>
+  <textarea id="msg" rows="4">Hello from ESP32</textarea>
+  <label><input type="checkbox" id="center"> Center</label>
+  <label><input type="checkbox" id="bold"> Bold</label>
+  <button onclick="printMessage()">Print</button>
+  <div id="out1"></div>
+</section>
+
+<section>
+  <h2>Print To-Do List</h2>
+  <label>Title</label>
+  <input type="text" id="todoTitle" value="Today’s Tasks">
+  <label>Items (one per line)</label>
+  <textarea id="todoItems" rows="6">Call supplier
+Prepare BOM
+Publish blog draft</textarea>
+  <button onclick="printTodo()">Print To-Do</button>
+  <div id="out2"></div>
+</section>
+
+<section>
+  <h2>Print Image</h2>
+  <input type="file" id="imgfile" accept="image/*">
+  <p><small>Image will be resized to fit width and dithered in your browser, then sent as 1-bit data.</small></p>
+  <button onclick="printImage()">Print Image</button>
+  <canvas id="cv" width="512" height="1" style="display:none"></canvas>
+  <div id="out3"></div>
+</section>
+
+<script>
+const POST = (url, body, type="application/json") =>
+  fetch(url, {method:"POST", headers:{"Content-Type":type}, body});
+
+async function printMessage(){
+  const text = document.getElementById('msg').value;
+  const center = document.getElementById('center').checked;
+  const bold   = document.getElementById('bold').checked;
+  const r = await POST("/api/print-message", JSON.stringify({text, center, bold}));
+  document.getElementById('out1').textContent = (await r.text());
+}
+
+async function printTodo(){
+  const title = document.getElementById('todoTitle').value;
+  const items = document.getElementById('todoItems').value;
+  const r = await POST("/api/print-todo", JSON.stringify({title, items}));
+  document.getElementById('out2').textContent = (await r.text());
+}
+
+async function printImage(){
+  const f = document.getElementById('imgfile').files[0];
+  if (!f) { alert("Choose an image"); return; }
+  // Draw to canvas, resize to <=512 px width, grayscale + Floyd–Steinberg dither client-side
+  const img = new Image();
+  img.src = URL.createObjectURL(f);
+  img.onload = async () => {
+    const maxW = 512;
+    const scale = Math.min(1, maxW / img.width);
+    const w = Math.round(img.width * scale);
+    const h = Math.round(img.height * scale);
+    const cv = document.getElementById('cv');
+    cv.width = w; cv.height = h;
+    const cx = cv.getContext('2d');
+    cx.drawImage(img, 0, 0, w, h);
+    // Get grayscale
+    let im = cx.getImageData(0,0,w,h);
+    let d = im.data;
+    let gray = new Uint8Array(w*h);
+    for (let i=0, p=0; i<d.length; i+=4, p++){
+      const g = (d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114);
+      gray[p] = g|0;
+    }
+    // Floyd–Steinberg dither to 0/255
+    for (let y=0; y<h; y++){
+      for (let x=0; x<w; x++){
+        const i = y*w + x;
+        const old = gray[i];
+        const newv = old < 128 ? 0 : 255;
+        const err = old - newv;
+        gray[i] = newv;
+        const spread = [[1,0,7/16],[ -1,1,3/16],[0,1,5/16],[1,1,1/16]];
+        for (const [dx,dy,coef] of spread){
+          const nx = x+dx, ny = y+dy;
+          if (nx>=0 && nx<w && ny>=0 && ny<h){
+            const j = ny*w + nx;
+            let v = gray[j] + err*coef;
+            if (v<0) v=0; if (v>255) v=255;
+            gray[j] = v;
+          }
+        }
+      }
+    }
+    // Build payload: 4B w, 4B h, then w*h bytes grayscale
+    const hdr = new Uint8Array(8);
+    const dv = new DataView(hdr.buffer);
+    dv.setInt32(0, w, true); dv.setInt32(4, h, true);
+    const body = new Uint8Array(8 + gray.length);
+    body.set(hdr, 0); body.set(gray, 8);
+    const r = await fetch("/api/print-bitmap", {method:"POST", body});
+    document.getElementById('out3').textContent = (await r.text());
+  };
+}
+</script>
